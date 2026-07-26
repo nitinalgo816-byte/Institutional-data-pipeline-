@@ -1,56 +1,39 @@
 import os
+import io
 import requests
 import pandas as pd
 import numpy as np
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import urllib.parse
 import py_vollib_vectorized
-import io
 
-# ==========================================
-# 1. SETUP & CONFIGURATION (AUTO WEEKEND ADJUSTMENT)
-# ==========================================
-now = datetime.today()
-if now.weekday() == 5:    # Saturday -> Friday
-    target_date = now - timedelta(days=1)
-elif now.weekday() == 6:  # Sunday -> Friday
-    target_date = now - timedelta(days=2)
-else:
-    target_date = now
-
-TODAY_STR = target_date.strftime('%Y-%m-%d')
-print(f"📅 Target Data Date set to: {TODAY_STR} ({target_date.strftime('%A')})")
-
-FOLDER_PATH = "output_data/"
-os.makedirs(FOLDER_PATH, exist_ok=True)
-
+# --- CONFIGURATION & ENVIRONMENT VARIABLES ---
 ACCESS_TOKEN = os.getenv("UPSTOX_ACCESS_TOKEN")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 HEADERS = {
     'Accept': 'application/json',
     'Authorization': f'Bearer {ACCESS_TOKEN}'
 }
-
 RISK_FREE_RATE = 0.07
 
-def send_telegram_alert(message):
-    """Sends a notification message via Telegram Bot API."""
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram credentials missing. Skipping notification.")
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown"
-    }
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print(f"🚨 Failed to send Telegram alert: {e}")
+def get_latest_trading_date():
+    """Uses UTC time to guarantee it matches the Indian trading day that just closed."""
+    # 20:00 UTC = 01:30 AM IST the next day. The UTC date is the correct trading date.
+    today = datetime.now(timezone.utc).date()
+    if today.weekday() == 5:  # Saturday
+        target = today - timedelta(days=1)
+    elif today.weekday() == 6:  # Sunday
+        target = today - timedelta(days=2)
+    else:
+        target = today
+    return target.strftime('%Y-%m-%d')
+
+TODAY_STR = get_latest_trading_date()
+print(f"📅 Target Data Date set to: {TODAY_STR}")
+
+FOLDER_PATH = "output_data/"
+os.makedirs(FOLDER_PATH, exist_ok=True)
 
 # ==========================================
 # 2. DOWNLOAD COMPLETE MASTER INSTRUMENT DATABASE
@@ -68,9 +51,9 @@ try:
     if 'expiry' in MASTER_DB.columns:
         MASTER_DB['expiry'] = pd.to_datetime(MASTER_DB['expiry']).dt.strftime('%Y-%m-%d')
         
-    print("    ✅ Complete Master Database Loaded Successfully.")
+    print("   ✅ Complete Master Database Loaded Successfully.")
 except Exception as e:
-    print(f"    🚨 Failed to load master database: {e}")
+    print(f"   🚨 Failed to load master database: {e}")
     MASTER_DB = pd.DataFrame()
 
 # ==========================================
@@ -157,6 +140,7 @@ if not MASTER_DB.empty:
         match = eq_df[eq_df['tradingsymbol'] == sym]
         if not match.empty:
             EQUITY_ASSETS[sym] = {'key': match.iloc[0]['instrument_key'], 'segment': 'NSE'}
+    print(f"   ✅ Successfully mapped {len(EQUITY_ASSETS)} Equities from the master database.")
 
 MASTER_SPOT_LIST = {**MACRO_INDICATORS, **CURRENCIES, **MCX_COMMODITIES, **EQUITY_ASSETS}
 
@@ -170,7 +154,7 @@ def fetch_1min_candles(instrument_key, date_str):
         response = requests.get(url, headers=HEADERS)
         if response.status_code == 200:
             res_data = response.json()
-            if 'data' in res_data and res_data['data']['candles']:
+            if 'data' in res_data and res_data['data'] and res_data['data']['candles']:
                 df = pd.DataFrame(res_data['data']['candles'], 
                                   columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'OpenInterest'])
                 df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
@@ -231,6 +215,8 @@ def process_asset(name, config):
     strike_gap = config.get('gap', None)
     is_index = True if 'INDEX' in str(key) else False
     
+    print(f"\n--- Analyzing: {name} ({segment}) ---")
+    
     spot_df = pd.DataFrame()
     if segment == "NSE":
         spot_df = fetch_1min_candles(key, TODAY_STR)
@@ -243,18 +229,26 @@ def process_asset(name, config):
                 f_match = fut_contracts[fut_contracts['expiry'] == exp].iloc[0]
                 spot_df = fetch_1min_candles(f_match['instrument_key'], TODAY_STR)
                 if not spot_df.empty:
+                    sym_name = f_match.get('tradingsymbol', exp)
+                    print(f"   🔄 Extracted Active Future ({sym_name}) as Base Spot")
                     break
 
     if spot_df.empty:
+        print(f"   ⚠️ No Base data found for {name} on {TODAY_STR}. Skipping derivatives.")
         return
         
-    spot_df.to_csv(f"{FOLDER_PATH}{name}_Base_1min.csv", index=False)
+    base_file_name = f"{name}_Base_1min.csv"
+    base_file_path = os.path.join(FOLDER_PATH, base_file_name)
+    spot_df.to_csv(base_file_path, index=False)
+    print(f"   ✅ Saved Base Data ({len(spot_df)} rows)")
+    
     latest_spot = spot_df['Close'].iloc[-1]
     
+    # Skip Options/Futures mapping for Macro Indicators
     if name in MACRO_INDICATORS:
         return
 
-    # Futures Data
+    # Fetch Futures Data
     fut_contracts = get_live_contracts(key, "future", segment)
     if not fut_contracts.empty and 'expiry' in fut_contracts.columns:
         future_expiries = sorted(fut_contracts['expiry'].unique())[:3]
@@ -263,10 +257,13 @@ def process_asset(name, config):
             fut_df = fetch_1min_candles(f_match['instrument_key'], TODAY_STR)
             if not fut_df.empty:
                 sym = f_match.get('tradingsymbol', f'FUT_{f_exp}')
-                fut_df.to_csv(f"{FOLDER_PATH}{name}_{sym}_Future.csv", index=False)
-            time.sleep(0.1)
+                fut_file_name = f"{name}_{sym}_Future.csv"
+                fut_file_path = os.path.join(FOLDER_PATH, fut_file_name)
+                fut_df.to_csv(fut_file_path, index=False)
+                print(f"   ✅ Saved Future: {sym}")
+            time.sleep(0.3)
 
-    # Options Chain & Greeks
+    # Fetch Options Chain & Compute Greeks
     opt_contracts = get_live_contracts(key, "option", segment)
     if not opt_contracts.empty and 'expiry' in opt_contracts.columns:
         nearest_expiry = sorted(opt_contracts['expiry'].unique())[0]
@@ -304,6 +301,7 @@ def process_asset(name, config):
                     continue
                     
                 master_df = pd.merge(opt_df, spot_df[['Date', 'Close']], on='Date', how='inner', suffixes=('', '_Spot'))
+                
                 t_days = 7.0 if is_index else 30.0 
                 master_df['T_Annual'] = t_days / 365.0
                 
@@ -323,41 +321,30 @@ def process_asset(name, config):
                     master_df['Theta'] = greeks['theta']
                     master_df['Vega'] = greeks['vega']
                     
-                    file_name = f"{FOLDER_PATH}{name}_{nearest_expiry}_{t['strike']}_{t['type']}_{t['tag']}_Enriched.csv"
-                    master_df.to_csv(file_name, index=False)
+                    opt_file_name = f"{name}_{nearest_expiry}_{t['strike']}_{t['type']}_{t['tag']}_Enriched.csv"
+                    opt_file_path = os.path.join(FOLDER_PATH, opt_file_name)
+                    master_df.to_csv(opt_file_path, index=False)
                 except Exception:
                     pass
-                time.sleep(0.1)
+                time.sleep(0.3) 
+                
+        print(f"   ✅ Processed Options Chain & Greeks for {name}")
 
 # ==========================================
-# 6. RUN THE MASTER PIPELINE & NOTIFY
+# 6. MAIN EXECUTION
 # ==========================================
 def main():
-    print(f"\n🚀 INITIALIZING PIPELINE DATA CAPTURE FOR {TODAY_STR}")
+    print(f"\n🚀 INITIALIZING DATA CAPTURE FOR {TODAY_STR}")
 
-    if not ACCESS_TOKEN:
-        print("🚨 Error: UPSTOX_ACCESS_TOKEN is missing!")
-        send_telegram_alert("🚨 *Pipeline Failed*: `UPSTOX_ACCESS_TOKEN` is missing from secrets!")
-        return
+    for name, config in INDICES.items():
+        process_asset(name, config)
+        time.sleep(0.5)
 
-    try:
-        for name, config in INDICES.items():
-            process_asset(name, config)
-            time.sleep(0.2)
+    for name, config in MASTER_SPOT_LIST.items():
+        process_asset(name, config)
+        time.sleep(0.5)
 
-        for name, config in MASTER_SPOT_LIST.items():
-            process_asset(name, config)
-            time.sleep(0.2)
-
-        file_count = len(os.listdir(FOLDER_PATH))
-        success_msg = f"✅ *Institutional Data Pipeline Completed Successfully!*\n📅 Date: `{TODAY_STR}`\n📁 Files Generated: `{file_count}` archived files."
-        print(success_msg)
-        send_telegram_alert(success_msg)
-
-    except Exception as e:
-        error_msg = f"🚨 *Pipeline Error Encountered*:\n`{str(e)}`"
-        print(error_msg)
-        send_telegram_alert(error_msg)
+    print(f"\n🎉 EXCELLENT! Master Database Updated Successfully.")
 
 if __name__ == "__main__":
     main()
