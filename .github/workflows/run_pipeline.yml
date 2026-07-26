@@ -47,21 +47,26 @@ jobs:
 
       - name: Zip Data for Telegram
         run: |
-          DATE_STR=$(date +'%Y-%m-%d')
-          # Zip only today's specific dated subfolder
-          zip -r "Market_Data_$DATE_STR.zip" output_data/$DATE_STR/
+          # Automatically find the most recent folder Python worked on to bypass weekend date mismatches
+          LATEST_FOLDER=$(ls -td output_data/*/ | head -1 | sed 's/\/$//')
+          TARGET_DATE=$(basename "$LATEST_FOLDER")
+          
+          echo "Target trading date detected as: $TARGET_DATE"
+          zip -r "Market_Data_$TARGET_DATE.zip" "output_data/$TARGET_DATE/"
+          
+          # Save variables for the Telegram step
+          echo "ZIP_FILE=Market_Data_$TARGET_DATE.zip" >> $GITHUB_ENV
+          echo "TARGET_DATE=$TARGET_DATE" >> $GITHUB_ENV
 
       - name: Send Consolidated Archive to Telegram
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          DATE_STR=$(date +'%Y-%m-%d')
-          FILE_NAME="Market_Data_$DATE_STR.zip"
-          CAPTION="📊 Complete Market Data Archive for $DATE_STR (NSE & MCX) - Pipeline Completed ✅"
+          CAPTION="📊 Complete Market Data Archive for ${{ env.TARGET_DATE }} (NSE & MCX) - Pipeline Completed ✅"
           
           curl -F chat_id="$TELEGRAM_CHAT_ID" \
-               -F document=@"$FILE_NAME" \
+               -F document=@"${{ env.ZIP_FILE }}" \
                -F caption="$CAPTION" \
                "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendDocument"
 
