@@ -19,7 +19,6 @@ RISK_FREE_RATE = 0.07
 
 def get_latest_trading_date():
     """Uses UTC time to guarantee it matches the Indian trading day that just closed."""
-    # 20:00 UTC = 01:30 AM IST the next day. The UTC date is the correct trading date.
     today = datetime.now(timezone.utc).date()
     if today.weekday() == 5:  # Saturday
         target = today - timedelta(days=1)
@@ -32,7 +31,8 @@ def get_latest_trading_date():
 TODAY_STR = get_latest_trading_date()
 print(f"📅 Target Data Date set to: {TODAY_STR}")
 
-FOLDER_PATH = "output_data/"
+# Dynamically create a dated subfolder for daily historical archiving
+FOLDER_PATH = f"output_data/{TODAY_STR}/"
 os.makedirs(FOLDER_PATH, exist_ok=True)
 
 # ==========================================
@@ -244,7 +244,6 @@ def process_asset(name, config):
     
     latest_spot = spot_df['Close'].iloc[-1]
     
-    # Skip Options/Futures mapping for Macro Indicators
     if name in MACRO_INDICATORS:
         return
 
