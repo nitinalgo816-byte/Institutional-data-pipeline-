@@ -1,11 +1,13 @@
 name: Institutional Data Pipeline
 
 on:
+  schedule:
+    - cron: '30 18 * * *' # Automatically runs every night at 12:00 AM IST (18:30 UTC)
   workflow_dispatch:
     inputs:
       access_token:
-        description: 'Paste Today Upstox Access Token Here'
-        required: true
+        description: 'Optional manual token override'
+        required: false
         type: string
 
 jobs:
@@ -27,7 +29,7 @@ jobs:
 
     - name: Run Pipeline Script & Sync to Drive
       env:
-        UPSTOX_ACCESS_TOKEN: ${{ github.event.inputs.access_token }}
+        UPSTOX_ACCESS_TOKEN: ${{ github.event.inputs.access_token != '' && github.event.inputs.access_token || secrets.UPSTOX_ACCESS_TOKEN }}
         GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
         GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
       run: |
