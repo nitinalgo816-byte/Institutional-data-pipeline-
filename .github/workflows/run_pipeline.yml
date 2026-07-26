@@ -3,12 +3,18 @@ name: Institutional Data Pipeline
 on:
   workflow_dispatch:
   schedule:
-    - cron: '30 18 * * 1-5'
+    # 20:00 UTC = 01:30 AM IST (Runs Tuesday to Saturday morning)
+    # This captures the previous day's Monday-Friday trading sessions safely after all markets (NSE + MCX) settle.
+    - cron: '0 20 * * 1-5'
+
+# Required to allow GitHub Actions to commit and push files to your repository
+permissions:
+  contents: write
 
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -23,16 +29,51 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests pandas numpy py_vollib py_vollib_vectorized
 
-      - name: Run Pipeline Script
+      - name: Run Pipeline Script (with Auto-Retries)
         env:
           UPSTOX_ACCESS_TOKEN: ${{ secrets.UPSTOX_ACCESS_TOKEN }}
+        run: |
+          max_retries=3
+          count=0
+          
+          # Retry loop: wait 2 minutes (120s) between retries if the script crashes due to API limits
+          until python pipeline.py; do
+            exit_code=$?
+            count=$((count + 1))
+            if [ $count -ge $max_retries ]; then
+              echo "🚨 Pipeline completely failed after $max_retries attempts."
+              exit $exit_code
+            fi
+            echo "⚠️ Pipeline failed (Upstox timeout/error). Retrying in 2 minutes... (Attempt $count of $max_retries)"
+            sleep 120
+          done
+
+      - name: Zip Data for Telegram
+        run: |
+          # Compress all CSVs into a single ZIP archive
+          DATE_STR=$(date +'%Y-%m-%d')
+          zip -r "Market_Data_$DATE_STR.zip" output_data/
+
+      - name: Send Consolidated Archive to Telegram
+        env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python pipeline.py
+          DATE_STR=$(date +'%Y-%m-%d')
+          FILE_NAME="Market_Data_$DATE_STR.zip"
+          CAPTION="📊 Complete Market Data Archive for $DATE_STR (NSE & MCX) - Pipeline Completed ✅"
+          
+          # Use curl to upload the ZIP directly to Telegram
+          curl -F chat_id="$TELEGRAM_CHAT_ID" \
+               -F document=@"$FILE_NAME" \
+               -F caption="$CAPTION" \
+               "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendDocument"
 
-      - name: Upload Output Data Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: trading-data-archive
-          path: output_data/
+      - name: Commit and Push Data to Repository
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add output_data/
+          # Uses '|| echo' so the pipeline doesn't crash if the data is exactly the same as a previous run
+          git commit -m "Auto-archive full institutional trading dataset & Greeks" || echo "No new data to commit"
+          git push
