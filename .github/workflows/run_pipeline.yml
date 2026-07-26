@@ -3,7 +3,7 @@ name: Institutional Data Pipeline
 on:
   workflow_dispatch:
   schedule:
-    - cron: '30 18 * * 1-5' # Runs automatically Monday to Friday at 12:00 AM IST
+    - cron: '30 18 * * 1-5'
 
 jobs:
   run-pipeline:
@@ -27,6 +27,8 @@ jobs:
       - name: Run Pipeline Script
         env:
           UPSTOX_ACCESS_TOKEN: ${{ secrets.UPSTOX_ACCESS_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python pipeline.py
 
