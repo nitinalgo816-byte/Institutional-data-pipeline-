@@ -8,11 +8,14 @@ import os
 import sys
 import py_vollib_vectorized
 import io
+import json
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 
 # ==========================================
 # 1. SETUP & CONFIGURATION (TOKEN FROM ENV)
 # ==========================================
-# GitHub Actions will pass the daily token securely via environment variables
 ACCESS_TOKEN = os.environ.get('UPSTOX_ACCESS_TOKEN')
 
 if not ACCESS_TOKEN:
@@ -26,7 +29,6 @@ HEADERS = {
 
 RISK_FREE_RATE = 0.07
 
-# Target Date: Today (or Friday if run on weekends)
 now = datetime.today()
 if now.weekday() == 5:    # Saturday -> Friday
     target_date = now - timedelta(days=1)
@@ -88,27 +90,27 @@ CURRENCIES = {
 }
 
 MCX_COMMODITIES = {
-    'GOLD_Standard': {'key': 'GOLD', 'segment': 'MCX'},
-    'GOLD_Ten': {'key': ['GOLD10G', 'GOLD10'], 'segment': 'MCX'},
-    'GOLD_Mini': {'key': 'GOLDM', 'segment': 'MCX'},
-    'GOLD_Guinea': {'key': 'GOLDGUINEA', 'segment': 'MCX'},
-    'GOLD_Petal': {'key': 'GOLDPETAL', 'segment': 'MCX'},
-    'SILVER_Standard': {'key': 'SILVER', 'segment': 'MCX'},
-    'SILVER_100': {'key': ['SILVER100', 'SILVER100G'], 'segment': 'MCX'},
-    'SILVER_Mini': {'key': 'SILVERM', 'segment': 'MCX'},
-    'SILVER_Micro': {'key': 'SILVERMIC', 'segment': 'MCX'},
-    'CRUDEOIL': {'key': 'CRUDEOIL', 'segment': 'MCX'},
-    'NATURALGAS': {'key': 'NATURALGAS', 'segment': 'MCX'},
-    'ALUMINIUM_Standard': {'key': 'ALUMINIUM', 'segment': 'MCX'},
-    'ALUMINIUM_Mini': {'key': 'ALUMINI', 'segment': 'MCX'},
-    'COPPER_Standard': {'key': 'COPPER', 'segment': 'MCX'},
-    'COPPER_Mini': {'key': ['COPMINI', 'COPPERMINI', 'COPPERM'], 'segment': 'MCX'},
-    'LEAD_Standard': {'key': 'LEAD', 'segment': 'MCX'},
-    'LEAD_Mini': {'key': 'LEADMINI', 'segment': 'MCX'},
-    'ZINC_Standard': {'key': 'ZINC', 'segment': 'MCX'},
-    'ZINC_Mini': {'key': 'ZINCMINI', 'segment': 'MCX'},
-    'NICKEL_Standard': {'key': 'NICKEL', 'segment': 'MCX'},
-    'NICKEL_Mini': {'key': ['NICKELM', 'NICKELMINI'], 'segment': 'MCX'}
+    'GOLD_Standard': {'key': 'GOLD', 'segment': 'MCX', 'lot_size': 1000},
+    'GOLD_Ten': {'key': ['GOLD10G', 'GOLD10'], 'segment': 'MCX', 'lot_size': 10},
+    'GOLD_Mini': {'key': 'GOLDM', 'segment': 'MCX', 'lot_size': 100},
+    'GOLD_Guinea': {'key': 'GOLDGUINEA', 'segment': 'MCX', 'lot_size': 8},
+    'GOLD_Petal': {'key': 'GOLDPETAL', 'segment': 'MCX', 'lot_size': 1},
+    'SILVER_Standard': {'key': 'SILVER', 'segment': 'MCX', 'lot_size': 30000},
+    'SILVER_100': {'key': ['SILVER100', 'SILVER100G'], 'segment': 'MCX', 'lot_size': 100},
+    'SILVER_Mini': {'key': 'SILVERM', 'segment': 'MCX', 'lot_size': 5000},
+    'SILVER_Micro': {'key': 'SILVERMIC', 'segment': 'MCX', 'lot_size': 1000},
+    'CRUDEOIL': {'key': 'CRUDEOIL', 'segment': 'MCX', 'lot_size': 100},
+    'NATURALGAS': {'key': 'NATURALGAS', 'segment': 'MCX', 'lot_size': 1250},
+    'ALUMINIUM_Standard': {'key': 'ALUMINIUM', 'segment': 'MCX', 'lot_size': 5000},
+    'ALUMINIUM_Mini': {'key': 'ALUMINI', 'segment': 'MCX', 'lot_size': 1000},
+    'COPPER_Standard': {'key': 'COPPER', 'segment': 'MCX', 'lot_size': 2500},
+    'COPPER_Mini': {'key': ['COPMINI', 'COPPERMINI', 'COPPERM'], 'segment': 'MCX', 'lot_size': 250},
+    'LEAD_Standard': {'key': 'LEAD', 'segment': 'MCX', 'lot_size': 5000},
+    'LEAD_Mini': {'key': 'LEADMINI', 'segment': 'MCX', 'lot_size': 1000},
+    'ZINC_Standard': {'key': 'ZINC', 'segment': 'MCX', 'lot_size': 5000},
+    'ZINC_Mini': {'key': 'ZINCMINI', 'segment': 'MCX', 'lot_size': 1000},
+    'NICKEL_Standard': {'key': 'NICKEL', 'segment': 'MCX', 'lot_size': 1500},
+    'NICKEL_Mini': {'key': ['NICKELM', 'NICKELMINI'], 'segment': 'MCX', 'lot_size': 250}
 }
 
 NIFTY_200_SYMBOLS = [
@@ -143,7 +145,7 @@ NIFTY_200_SYMBOLS = [
 EQUITY_ASSETS = {}
 if not MASTER_DB.empty:
     eq_df = MASTER_DB[MASTER_DB['instrument_key'].str.startswith('NSE_EQ|', na=False)]
-    for sym in NIFTS if 'NIFTS' in locals() else NIFTY_200_SYMBOLS:
+    for sym in NIFTY_200_SYMBOLS:
         match = eq_df[eq_df['tradingsymbol'] == sym]
         if not match.empty:
             EQUITY_ASSETS[sym] = {'key': match.iloc[0]['instrument_key'], 'segment': 'NSE'}
@@ -286,12 +288,54 @@ def process_asset(name, config):
                     pass
                 time.sleep(0.2)
 
+def upload_to_gdrive(folder_path, today_str):
+    SCOPES = ['https://www.googleapis.com/auth/drive.file']
+    creds_json = os.environ.get('GCP_SERVICE_ACCOUNT_KEY')
+    folder_id = os.environ.get('GDRIVE_FOLDER_ID')
+    
+    if not creds_json or not folder_id:
+        print("⚠️ Google Drive credentials or folder ID missing. Skipping cloud upload.")
+        return
+
+    try:
+        print("\n☁️ Connecting to Google Drive...")
+        creds_dict = json.loads(creds_json)
+        creds = service_account.Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+        service = build('drive', 'v3', credentials=creds)
+
+        subfolder_metadata = {
+            'name': f'Institutional_Master_Archive_{today_str}',
+            'mimeType': 'application/vnd.google-apps.folder',
+            'parents': [folder_id]
+        }
+        subfolder = service.files().create(body=subfolder_metadata, fields='id').execute()
+        sub_folder_id = subfolder.get('id')
+
+        uploaded_count = 0
+        for filename in os.listdir(folder_path):
+            file_path = os.path.join(folder_path, filename)
+            if os.path.isfile(file_path):
+                file_metadata = {
+                    'name': filename,
+                    'parents': [sub_folder_id]
+                }
+                media = MediaFileUpload(file_path, resumable=True)
+                service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+                uploaded_count += 1
+        
+        print(f"   ✅ Successfully uploaded {uploaded_count} files directly to Google Drive!")
+    except Exception as e:
+        print(f"   🚨 Failed to upload to Google Drive: {e}")
+
 # ==========================================
-# 5. EXECUTION
+# 5. EXECUTION & DRIVE SYNC
 # ==========================================
 print(f"\n🚀 STARTING PIPELINE FOR {TODAY_STR}")
 for name, config in INDICES.items():
     process_asset(name, config)
 for name, config in MASTER_SPOT_LIST.items():
     process_asset(name, config)
-print("\n🎉 PIPELINE FINISHED SUCCESSFULLY.")
+
+upload_to_gdrive(FOLDER_PATH, TODAY_STR)
+
+print("\n🎉 PIPELINE & CLOUD SYNC FINISHED SUCCESSFULLY.")
