@@ -1,34 +1,152 @@
 import os
-import json
 import requests
 import pandas as pd
+import numpy as np
+import time
 from datetime import datetime, timedelta
 import urllib.parse
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+import py_vollib_vectorized
+import io
 
-# --- CONFIGURATION & ENVIRONMENT VARIABLES ---
+# ==========================================
+# 1. SETUP & CONFIGURATION (AUTO WEEKEND ADJUSTMENT)
+# ==========================================
+now = datetime.today()
+if now.weekday() == 5:    # Saturday -> Friday
+    target_date = now - timedelta(days=1)
+elif now.weekday() == 6:  # Sunday -> Friday
+    target_date = now - timedelta(days=2)
+else:
+    target_date = now
+
+TODAY_STR = target_date.strftime('%Y-%m-%d')
+print(f"📅 Target Data Date set to: {TODAY_STR} ({target_date.strftime('%A')})")
+
+FOLDER_PATH = "output_data/"
+os.makedirs(FOLDER_PATH, exist_ok=True)
+
+# Read token securely from GitHub Secrets environment variable
 ACCESS_TOKEN = os.getenv("UPSTOX_ACCESS_TOKEN")
-SERVICE_ACCOUNT_KEY_JSON = os.getenv("GCP_SERVICE_ACCOUNT_KEY")
-FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID")
 
 HEADERS = {
-    "Accept": "application/json",
-    "Authorization": f"Bearer {ACCESS_TOKEN}"
+    'Accept': 'application/json',
+    'Authorization': f'Bearer {ACCESS_TOKEN}'
 }
 
-def get_latest_trading_date():
-    """Automatically rolls back to Friday if run on a weekend."""
-    today = datetime.now().date()
-    if today.weekday() == 5:  # Saturday
-        target = today - timedelta(days=1)
-    elif today.weekday() == 6:  # Sunday
-        target = today - timedelta(days=2)
-    else:
-        target = today
-    return target.strftime('%Y-%m-%d')
+RISK_FREE_RATE = 0.07
 
+# ==========================================
+# 2. DOWNLOAD COMPLETE MASTER INSTRUMENT DATABASE
+# ==========================================
+print("\n📥 Downloading Universal Master Exchange Database...")
+try:
+    BROWSER_HEADERS = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
+    }
+    res = requests.get("https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz", headers=BROWSER_HEADERS)
+    res.raise_for_status()
+    MASTER_DB = pd.read_csv(io.BytesIO(res.content), compression='gzip')
+    
+    MASTER_DB.rename(columns={'strike': 'strike_price'}, inplace=True)
+    if 'expiry' in MASTER_DB.columns:
+        MASTER_DB['expiry'] = pd.to_datetime(MASTER_DB['expiry']).dt.strftime('%Y-%m-%d')
+        
+    print("    ✅ Complete Master Database Loaded Successfully.")
+except Exception as e:
+    print(f"    🚨 Failed to load master database: {e}")
+    MASTER_DB = pd.DataFrame()
+
+# ==========================================
+# 3. EXPANDED INSTITUTIONAL ASSET UNIVERSE 
+# ==========================================
+INDICES = {
+    'NIFTY_50': {'key': 'NSE_INDEX|Nifty 50', 'segment': 'NSE', 'gap': 50},
+    'BANKNIFTY': {'key': 'NSE_INDEX|Nifty Bank', 'segment': 'NSE', 'gap': 100},
+    'FINNIFTY': {'key': 'NSE_INDEX|Nifty Fin Service', 'segment': 'NSE', 'gap': 50}
+}
+
+MACRO_INDICATORS = {
+    'INDIA_VIX': {'key': 'NSE_INDEX|India VIX', 'segment': 'NSE'},
+    'NIFTY_IT': {'key': 'NSE_INDEX|Nifty IT', 'segment': 'NSE'},
+    'NIFTY_AUTO': {'key': 'NSE_INDEX|Nifty Auto', 'segment': 'NSE'},
+    'NIFTY_FMCG': {'key': 'NSE_INDEX|Nifty FMCG', 'segment': 'NSE'},
+    'NIFTY_METAL': {'key': 'NSE_INDEX|Nifty Metal', 'segment': 'NSE'}
+}
+
+CURRENCIES = {
+    'USDINR': {'key': 'USDINR', 'segment': 'CDS'},
+    'EURINR': {'key': 'EURINR', 'segment': 'CDS'},
+    'GBPINR': {'key': 'GBPINR', 'segment': 'CDS'},
+    'JPYINR': {'key': 'JPYINR', 'segment': 'CDS'}
+}
+
+MCX_COMMODITIES = {
+    'GOLD_Standard': {'key': 'GOLD', 'segment': 'MCX', 'lot_size': 1000},
+    'GOLD_Ten': {'key': ['GOLD10G', 'GOLD10'], 'segment': 'MCX', 'lot_size': 10},
+    'GOLD_Mini': {'key': 'GOLDM', 'segment': 'MCX', 'lot_size': 100},
+    'GOLD_Guinea': {'key': 'GOLDGUINEA', 'segment': 'MCX', 'lot_size': 8},
+    'GOLD_Petal': {'key': 'GOLDPETAL', 'segment': 'MCX', 'lot_size': 1},
+    'SILVER_Standard': {'key': 'SILVER', 'segment': 'MCX', 'lot_size': 30000},
+    'SILVER_100': {'key': ['SILVER100', 'SILVER100G'], 'segment': 'MCX', 'lot_size': 100},
+    'SILVER_Mini': {'key': 'SILVERM', 'segment': 'MCX', 'lot_size': 5000},
+    'SILVER_Micro': {'key': 'SILVERMIC', 'segment': 'MCX', 'lot_size': 1000},
+    'CRUDEOIL': {'key': 'CRUDEOIL', 'segment': 'MCX', 'lot_size': 100},
+    'NATURALGAS': {'key': 'NATURALGAS', 'segment': 'MCX', 'lot_size': 1250},
+    'ALUMINIUM_Standard': {'key': 'ALUMINIUM', 'segment': 'MCX', 'lot_size': 5000},
+    'ALUMINIUM_Mini': {'key': 'ALUMINI', 'segment': 'MCX', 'lot_size': 1000},
+    'COPPER_Standard': {'key': 'COPPER', 'segment': 'MCX', 'lot_size': 2500},
+    'COPPER_Mini': {'key': ['COPMINI', 'COPPERMINI', 'COPPERM'], 'segment': 'MCX', 'lot_size': 250},
+    'LEAD_Standard': {'key': 'LEAD', 'segment': 'MCX', 'lot_size': 5000},
+    'LEAD_Mini': {'key': 'LEADMINI', 'segment': 'MCX', 'lot_size': 1000},
+    'ZINC_Standard': {'key': 'ZINC', 'segment': 'MCX', 'lot_size': 5000},
+    'ZINC_Mini': {'key': 'ZINCMINI', 'segment': 'MCX', 'lot_size': 1000},
+    'NICKEL_Standard': {'key': 'NICKEL', 'segment': 'MCX', 'lot_size': 1500},
+    'NICKEL_Mini': {'key': ['NICKELM', 'NICKELMINI'], 'segment': 'MCX', 'lot_size': 250}
+}
+
+NIFTY_200_SYMBOLS = [
+    '360ONE', 'ABB', 'APLAPOLLO', 'AUBANK', 'ADANIENSOL', 'ADANIENT', 'ADANIGREEN', 
+    'ADANIPORTS', 'ADANIPOWER', 'ATGL', 'ABCAPITAL', 'ABFRL', 'ALKEM', 'AMBUJACEM', 
+    'APOLLOHOSP', 'APOLLOTYRE', 'ASHOKLEY', 'ASIANPAINT', 'ASTRAL', 'AUROPHARMA', 
+    'DMART', 'AXISBANK', 'BSE', 'BAJAJ-AUTO', 'BAJFINANCE', 'BAJAJFINSV', 'BAJAJHIND', 
+    'BALKRISIND', 'BANKBARODA', 'BANKINDIA', 'BATAINDIA', 'BEL', 'BHARATFORG', 
+    'BHEL', 'BPCL', 'BHARTIARTL', 'BIOCON', 'BOSCHLTD', 'BRITANNIA', 'CESC', 
+    'CGPOWER', 'CANBK', 'CHOLAFIN', 'CIPLA', 'COALINDIA', 'COFORGE', 'COLPAL', 
+    'CONCOR', 'COROMANDEL', 'CROMPTON', 'CUB', 'CUMMINSIND', 'DLF', 'DABUR', 
+    'DALBHARAT', 'DEEPAKFERT', 'DIVISLAB', 'DIXON', 'LALPATHLAB', 'DRREDDY', 
+    'EICHERMOT', 'ESCORTS', 'EXIDEIND', 'NYKAA', 'FederalBNK', 'GAIL', 'GMRAIRPORT', 
+    'GLENMARK', 'GODREJCP', 'GODREJPROP', 'GRASIM', 'GUJGASLTD', 'HCLTECH', 
+    'HDFCBANK', 'HDFCLIFE', 'HAVELLS', 'HEROMOTOCO', 'HINDALCO', 'HAL', 'HINDCOPPER', 
+    'HINDPETRO', 'HINDUNILVR', 'ICICIBANK', 'ICICIGI', 'ICICIPRULI', 'IDBI', 'IDFCFIRSTB', 
+    'ITC', 'IEX', 'IOC', 'IRCTC', 'IRFC', 'IGL', 'INDUSTOWER', 
+    'INDUSINDBK', 'NAUKRI', 'INFY', 'IPCALAB', 'JSWENERGY', 'JSWSTEEL', 'JINDALSTEL', 
+    'JIOFIN', 'JUBLFOOD', 'KOTAKBANK', 'LTIM', 'LT', 'LUPIN', 'MRF', 'M&MFIN', 
+    'M&M', 'MANKIND', 'MARICO', 'MARUTI', 'MAXHEALTH', 'MPHASIS', 'MUTHOOTFIN', 
+    'NHPC', 'NMDC', 'NTPC', 'NATIONALUM', 'NESTLEIND', 'OBEROIRLTY', 'ONGC', 'PIIND', 
+    'PAGEIND', 'PATANJALI', 'PERSISTENT', 'PETRONET', 'PFIZER', 'PIDILITIND', 
+    'POWERCGRID', 'PNB', 'PVRINOX', 'RECLTD', 'RELIANCE', 'SBICARD', 'SBILIFE', 
+    'SBIN', 'SHREECEM', 'SHRIRAMFIN', 'SIEMENS', 'SONACOMS', 'SBFC', 'SRF', 
+    'SUNPHARMA', 'SUNTV', 'SYNGENE', 'TVSMOTOR', 'TCS', 'TATACHEM', 'TATACOMM', 
+    'TATACONSUM', 'TATAELXSI', 'TATAMOTORS', 'TATAPOWER', 'TATASTEEL', 'TECHM', 
+    'TITAN', 'TORNTPHARM', 'TORNTPOWER', 'TRENT', 'TIINDIA', 'UCL', 'ULTRACEMCO', 
+    'UNIONBANK', 'UPL', 'VEDL', 'IDEA', 'VOLTAS', 'WHIRLPOOL', 'WIPRO', 'YESBANK', 
+    'ZOMATO', 'ZYDUSLIFE'
+]
+
+EQUITY_ASSETS = {}
+if not MASTER_DB.empty:
+    eq_df = MASTER_DB[MASTER_DB['instrument_key'].str.startswith('NSE_EQ|', na=False)]
+    for sym in NIFTY_200_SYMBOLS:
+        match = eq_df[eq_df['tradingsymbol'] == sym]
+        if not match.empty:
+            EQUITY_ASSETS[sym] = {'key': match.iloc[0]['instrument_key'], 'segment': 'NSE'}
+    print(f"    ✅ Successfully mapped {len(EQUITY_ASSETS)} Equities from the master database.")
+
+MASTER_SPOT_LIST = {**MACRO_INDICATORS, **CURRENCIES, **MCX_COMMODITIES, **EQUITY_ASSETS}
+
+# ==========================================
+# 4. CORE API & MASTER SCANNING FUNCTIONS 
+# ==========================================
 def fetch_1min_candles(instrument_key, date_str):
     encoded_key = urllib.parse.quote(instrument_key)
     url = f"https://api.upstox.com/v3/historical-candle/{encoded_key}/minutes/1/{date_str}/{date_str}"
@@ -36,82 +154,192 @@ def fetch_1min_candles(instrument_key, date_str):
         response = requests.get(url, headers=HEADERS)
         if response.status_code == 200:
             res_data = response.json()
-            if 'data' in res_data and res_data['data'] and res_data['data']['candles']:
+            if 'data' in res_data and res_data['data']['candles']:
                 df = pd.DataFrame(res_data['data']['candles'], 
                                   columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'OpenInterest'])
                 df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
                 return df.sort_values('Date').reset_index(drop=True)
-            else:
-                print(f"   ⚠️ No candle data returned for {instrument_key} on {date_str}: {res_data}")
-        else:
-            print(f"   🚨 API Error {response.status_code} for {instrument_key}: {response.text}")
-    except Exception as e:
-        print(f"   🚨 Exception for {instrument_key}: {e}")
+    except Exception:
+        pass
     return pd.DataFrame()
 
-def upload_to_gdrive(file_path, file_name, folder_id):
-    if not SERVICE_ACCOUNT_KEY_JSON:
-        print("🚨 GCP_SERVICE_ACCOUNT_KEY environment variable is missing.")
-        return
-    if not folder_id:
-        print("🚨 GDRIVE_FOLDER_ID environment variable is missing.")
-        return
-    try:
-        key_dict = json.loads(SERVICE_ACCOUNT_KEY_JSON)
-        creds = service_account.Credentials.from_service_account_info(
-            key_dict, scopes=['https://www.googleapis.com/auth/drive.file']
-        )
-        service = build('drive', 'v3', credentials=creds)
+def get_live_contracts(key, contract_type="future", segment="NSE"):
+    if segment == "NSE":
+        url = f"https://api.upstox.com/v2/{contract_type}/contract"
+        params = {'instrument_key': key}
+        try:
+            response = requests.get(url, headers=HEADERS, params=params)
+            if response.status_code == 200:
+                df = pd.DataFrame(response.json().get('data', []))
+                if not df.empty and 'expiry' in df.columns:
+                    df = df[df['expiry'] >= TODAY_STR]
+                return df
+        except Exception:
+            pass
+        return pd.DataFrame()
+    else:
+        if MASTER_DB.empty: return pd.DataFrame()
         
-        file_metadata = {
-            'name': file_name,
-            'parents': [folder_id]
-        }
-        media = MediaFileUpload(file_path, resumable=True)
-        file = service.files().create(
-            body=file_metadata, media_body=media, fields='id'
-        ).execute()
-        print(f"✅ Successfully uploaded {file_name} to Google Drive (ID: {file.get('id')})")
-    except Exception as e:
-        print(f"🚨 Google Drive Upload Error for {file_name}: {e}")
+        type_str = 'FUT' if contract_type == "future" else 'OPT'
+        keys_to_try = key if isinstance(key, list) else [key]
+        
+        filtered_df = pd.DataFrame()
+        for k in keys_to_try:
+            if contract_type == "future":
+                regex_pattern = f"^{k}\\d{{2}}[A-Z]{{3}}FUT" 
+            else:
+                regex_pattern = f"^{k}\\d{{2}}"
+                
+            filtered_df = MASTER_DB[
+                (MASTER_DB['tradingsymbol'].astype(str).str.contains(regex_pattern, na=False, regex=True)) & 
+                (MASTER_DB['instrument_type'].astype(str).str.contains(type_str))
+            ]
+            if not filtered_df.empty:
+                break
+        
+        if not filtered_df.empty:
+            filtered_df = filtered_df.copy()
+            if contract_type == "option":
+                filtered_df['instrument_type'] = filtered_df['option_type']
+            if 'expiry' in filtered_df.columns:
+                filtered_df = filtered_df[filtered_df['expiry'] >= TODAY_STR]
+            return filtered_df
+        return pd.DataFrame()
 
-def main():
-    print("Starting Institutional Data Pipeline...")
+# ==========================================
+# 5. UNIVERSAL PROCESSING ENGINE
+# ==========================================
+def process_asset(name, config):
+    key = config['key']
+    segment = config['segment']
+    strike_gap = config.get('gap', None)
+    is_index = True if 'INDEX' in str(key) else False
     
+    print(f"\n--- Analyzing: {name} ({segment}) ---")
+    
+    spot_df = pd.DataFrame()
+    if segment == "NSE":
+        spot_df = fetch_1min_candles(key, TODAY_STR)
+    
+    if spot_df.empty:
+        fut_contracts = get_live_contracts(key, "future", segment)
+        if not fut_contracts.empty and 'expiry' in fut_contracts.columns:
+            valid_expiries = sorted(fut_contracts['expiry'].unique())
+            for exp in valid_expiries:
+                f_match = fut_contracts[fut_contracts['expiry'] == exp].iloc[0]
+                spot_df = fetch_1min_candles(f_match['instrument_key'], TODAY_STR)
+                if not spot_df.empty:
+                    print(f"    🔄 Extracted Active Future as Base Spot")
+                    break
+
+    if spot_df.empty:
+        print(f"    ⚠️ No Base data found for {name} on {TODAY_STR}.")
+        return
+        
+    spot_df.to_csv(f"{FOLDER_PATH}{name}_Base_1min.csv", index=False)
+    print(f"    ✅ Saved Base Data ({len(spot_df)} rows)")
+    latest_spot = spot_df['Close'].iloc[-1]
+    
+    if name in MACRO_INDICATORS:
+        return
+
+    # Futures Data
+    fut_contracts = get_live_contracts(key, "future", segment)
+    if not fut_contracts.empty and 'expiry' in fut_contracts.columns:
+        future_expiries = sorted(fut_contracts['expiry'].unique())[:3]
+        for f_exp in future_expiries:
+            f_match = fut_contracts[fut_contracts['expiry'] == f_exp].iloc[0]
+            fut_df = fetch_1min_candles(f_match['instrument_key'], TODAY_STR)
+            if not fut_df.empty:
+                sym = f_match.get('tradingsymbol', f'FUT_{f_exp}')
+                fut_df.to_csv(f"{FOLDER_PATH}{name}_{sym}_Future.csv", index=False)
+                print(f"    ✅ Saved Future: {sym}")
+            time.sleep(0.2)
+
+    # Options Chain & Greeks
+    opt_contracts = get_live_contracts(key, "option", segment)
+    if not opt_contracts.empty and 'expiry' in opt_contracts.columns:
+        nearest_expiry = sorted(opt_contracts['expiry'].unique())[0]
+        expiry_chain = opt_contracts[opt_contracts['expiry'] == nearest_expiry]
+        
+        available_strikes = sorted(pd.to_numeric(expiry_chain['strike_price']).unique())
+        if available_strikes:
+            atm_strike = min(available_strikes, key=lambda x: abs(x - latest_spot))
+            atm_idx = available_strikes.index(atm_strike)
+            
+            if is_index and strike_gap:
+                strike_below = atm_strike - strike_gap
+                strike_above = atm_strike + strike_gap
+            else:
+                strike_below = available_strikes[max(0, atm_idx - 1)]
+                strike_above = available_strikes[min(len(available_strikes)-1, atm_idx + 1)]
+            
+            targets = [
+                {'strike': strike_below, 'type': 'CE', 'tag': 'ITM'},
+                {'strike': atm_strike,   'type': 'CE', 'tag': 'ATM'},
+                {'strike': strike_above, 'type': 'CE', 'tag': 'OTM'},
+                {'strike': strike_above, 'type': 'PE', 'tag': 'ITM'},
+                {'strike': atm_strike,   'type': 'PE', 'tag': 'ATM'},
+                {'strike': strike_below, 'type': 'PE', 'tag': 'OTM'}
+            ]
+            
+            for t in targets:
+                match = expiry_chain[(pd.to_numeric(expiry_chain['strike_price']) == t['strike']) & 
+                                     (expiry_chain['instrument_type'].astype(str).str.contains(t['type']))]
+                if match.empty:
+                    continue
+                    
+                opt_df = fetch_1min_candles(match.iloc[0]['instrument_key'], TODAY_STR)
+                if opt_df.empty:
+                    continue
+                    
+                master_df = pd.merge(opt_df, spot_df[['Date', 'Close']], on='Date', how='inner', suffixes=('', '_Spot'))
+                t_days = 7.0 if is_index else 30.0 
+                master_df['T_Annual'] = t_days / 365.0
+                
+                try:
+                    greeks = py_vollib_vectorized.get_all_greeks(
+                        flag=t['type'].lower(),
+                        S=master_df['Close_Spot'],
+                        K=t['strike'],
+                        t=master_df['T_Annual'],
+                        r=RISK_FREE_RATE,
+                        price=master_df['Close'],
+                        return_as='dataframe'
+                    )
+                    master_df['IV'] = greeks['iv']
+                    master_df['Delta'] = greeks['delta']
+                    master_df['Gamma'] = greeks['gamma']
+                    master_df['Theta'] = greeks['theta']
+                    master_df['Vega'] = greeks['vega']
+                    
+                    file_name = f"{FOLDER_PATH}{name}_{nearest_expiry}_{t['strike']}_{t['type']}_{t['tag']}_Enriched.csv"
+                    master_df.to_csv(file_name, index=False)
+                except Exception:
+                    pass
+                time.sleep(0.2) 
+                
+        print(f"    ✅ Processed Options Chain & Greeks")
+
+# ==========================================
+# 6. RUN THE MASTER PIPELINE
+# ==========================================
+def main():
+    print(f"\n🚀 INITIALIZING HEADLESS DATA CAPTURE FOR {TODAY_STR}")
+
     if not ACCESS_TOKEN:
         print("🚨 Error: UPSTOX_ACCESS_TOKEN is missing from GitHub secrets!")
         return
-    
-    target_date = get_latest_trading_date()
-    print(f"Target trading date for data extraction: {target_date}")
-    
-    # Asset watchlist (Indices & Core Equities)
-    instruments = {
-        "NIFTY_50": "NSE_INDEX|Nifty 50",
-        "BANK_NIFTY": "NSE_INDEX|Nifty Bank",
-        "RELIANCE": "NSE_EQ|INE002A01018",
-        "TCS": "NSE_EQ|INE467B01029",
-        "HDFCBANK": "NSE_EQ|INE040A01034"
-    }
-    
-    os.makedirs("output_data", exist_ok=True)
-    
-    for name, key in instruments.items():
-        print(f"Fetching 1-min candles for {name} ({key})...")
-        df = fetch_1min_candles(key, target_date)
-        
-        if not df.empty:
-            filename = f"{name}_{target_date}_1min.csv"
-            filepath = os.path.join("output_data", filename)
-            df.to_csv(filepath, index=False)
-            print(f"   Saved {filename} locally ({len(df)} rows). Uploading to Drive...")
-            
-            # Upload processed CSV to Google Drive folder
-            upload_to_gdrive(filepath, filename, FOLDER_ID)
-        else:
-            print(f"   Skipping upload for {name} due to empty data.")
 
-    print("Pipeline execution completed successfully.")
+    for name, config in INDICES.items():
+        process_asset(name, config)
+        time.sleep(0.3)
+
+    for name, config in MASTER_SPOT_LIST.items():
+        process_asset(name, config)
+        time.sleep(0.3)
+
+    print(f"\n🎉 Master Pipeline Execution Completed Successfully.")
 
 if __name__ == "__main__":
     main()
