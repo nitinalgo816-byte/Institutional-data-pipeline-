@@ -25,8 +25,9 @@ print(f"📅 Target Data Date set to: {TODAY_STR} ({target_date.strftime('%A')})
 FOLDER_PATH = "output_data/"
 os.makedirs(FOLDER_PATH, exist_ok=True)
 
-# Read token securely from GitHub Secrets environment variable
 ACCESS_TOKEN = os.getenv("UPSTOX_ACCESS_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 HEADERS = {
     'Accept': 'application/json',
@@ -34,6 +35,22 @@ HEADERS = {
 }
 
 RISK_FREE_RATE = 0.07
+
+def send_telegram_alert(message):
+    """Sends a notification message via Telegram Bot API."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ Telegram credentials missing. Skipping notification.")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"🚨 Failed to send Telegram alert: {e}")
 
 # ==========================================
 # 2. DOWNLOAD COMPLETE MASTER INSTRUMENT DATABASE
@@ -140,7 +157,6 @@ if not MASTER_DB.empty:
         match = eq_df[eq_df['tradingsymbol'] == sym]
         if not match.empty:
             EQUITY_ASSETS[sym] = {'key': match.iloc[0]['instrument_key'], 'segment': 'NSE'}
-    print(f"    ✅ Successfully mapped {len(EQUITY_ASSETS)} Equities from the master database.")
 
 MASTER_SPOT_LIST = {**MACRO_INDICATORS, **CURRENCIES, **MCX_COMMODITIES, **EQUITY_ASSETS}
 
@@ -215,8 +231,6 @@ def process_asset(name, config):
     strike_gap = config.get('gap', None)
     is_index = True if 'INDEX' in str(key) else False
     
-    print(f"\n--- Analyzing: {name} ({segment}) ---")
-    
     spot_df = pd.DataFrame()
     if segment == "NSE":
         spot_df = fetch_1min_candles(key, TODAY_STR)
@@ -229,15 +243,12 @@ def process_asset(name, config):
                 f_match = fut_contracts[fut_contracts['expiry'] == exp].iloc[0]
                 spot_df = fetch_1min_candles(f_match['instrument_key'], TODAY_STR)
                 if not spot_df.empty:
-                    print(f"    🔄 Extracted Active Future as Base Spot")
                     break
 
     if spot_df.empty:
-        print(f"    ⚠️ No Base data found for {name} on {TODAY_STR}.")
         return
         
     spot_df.to_csv(f"{FOLDER_PATH}{name}_Base_1min.csv", index=False)
-    print(f"    ✅ Saved Base Data ({len(spot_df)} rows)")
     latest_spot = spot_df['Close'].iloc[-1]
     
     if name in MACRO_INDICATORS:
@@ -253,8 +264,7 @@ def process_asset(name, config):
             if not fut_df.empty:
                 sym = f_match.get('tradingsymbol', f'FUT_{f_exp}')
                 fut_df.to_csv(f"{FOLDER_PATH}{name}_{sym}_Future.csv", index=False)
-                print(f"    ✅ Saved Future: {sym}")
-            time.sleep(0.2)
+            time.sleep(0.1)
 
     # Options Chain & Greeks
     opt_contracts = get_live_contracts(key, "option", segment)
@@ -317,29 +327,37 @@ def process_asset(name, config):
                     master_df.to_csv(file_name, index=False)
                 except Exception:
                     pass
-                time.sleep(0.2) 
-                
-        print(f"    ✅ Processed Options Chain & Greeks")
+                time.sleep(0.1)
 
 # ==========================================
-# 6. RUN THE MASTER PIPELINE
+# 6. RUN THE MASTER PIPELINE & NOTIFY
 # ==========================================
 def main():
-    print(f"\n🚀 INITIALIZING HEADLESS DATA CAPTURE FOR {TODAY_STR}")
+    print(f"\n🚀 INITIALIZING PIPELINE DATA CAPTURE FOR {TODAY_STR}")
 
     if not ACCESS_TOKEN:
-        print("🚨 Error: UPSTOX_ACCESS_TOKEN is missing from GitHub secrets!")
+        print("🚨 Error: UPSTOX_ACCESS_TOKEN is missing!")
+        send_telegram_alert("🚨 *Pipeline Failed*: `UPSTOX_ACCESS_TOKEN` is missing from secrets!")
         return
 
-    for name, config in INDICES.items():
-        process_asset(name, config)
-        time.sleep(0.3)
+    try:
+        for name, config in INDICES.items():
+            process_asset(name, config)
+            time.sleep(0.2)
 
-    for name, config in MASTER_SPOT_LIST.items():
-        process_asset(name, config)
-        time.sleep(0.3)
+        for name, config in MASTER_SPOT_LIST.items():
+            process_asset(name, config)
+            time.sleep(0.2)
 
-    print(f"\n🎉 Master Pipeline Execution Completed Successfully.")
+        file_count = len(os.listdir(FOLDER_PATH))
+        success_msg = f"✅ *Institutional Data Pipeline Completed Successfully!*\n📅 Date: `{TODAY_STR}`\n📁 Files Generated: `{file_count}` archived files."
+        print(success_msg)
+        send_telegram_alert(success_msg)
+
+    except Exception as e:
+        error_msg = f"🚨 *Pipeline Error Encountered*:\n`{str(e)}`"
+        print(error_msg)
+        send_telegram_alert(error_msg)
 
 if __name__ == "__main__":
     main()
