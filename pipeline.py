@@ -59,10 +59,13 @@ except Exception as e:
 # ==========================================
 # 3. EXPANDED INSTITUTIONAL ASSET UNIVERSE 
 # ==========================================
+# ---> SENSEX & BANKEX ADDED HERE <---
 INDICES = {
     'NIFTY_50': {'key': 'NSE_INDEX|Nifty 50', 'segment': 'NSE', 'gap': 50},
     'BANKNIFTY': {'key': 'NSE_INDEX|Nifty Bank', 'segment': 'NSE', 'gap': 100},
-    'FINNIFTY': {'key': 'NSE_INDEX|Nifty Fin Service', 'segment': 'NSE', 'gap': 50}
+    'FINNIFTY': {'key': 'NSE_INDEX|Nifty Fin Service', 'segment': 'NSE', 'gap': 50},
+    'SENSEX': {'key': 'BSE_INDEX|SENSEX', 'segment': 'BSE', 'gap': 100},
+    'BANKEX': {'key': 'BSE_INDEX|BANKEX', 'segment': 'BSE', 'gap': 100}
 }
 
 MACRO_INDICATORS = {
@@ -164,7 +167,8 @@ def fetch_1min_candles(instrument_key, date_str):
     return pd.DataFrame()
 
 def get_live_contracts(key, contract_type="future", segment="NSE"):
-    if segment == "NSE":
+    # ---> UPDATED TO SUPPORT BSE CONTRACT FETCHING <---
+    if segment in ["NSE", "BSE"]:
         url = f"https://api.upstox.com/v2/{contract_type}/contract"
         params = {'instrument_key': key}
         try:
@@ -218,7 +222,8 @@ def process_asset(name, config):
     print(f"\n--- Analyzing: {name} ({segment}) ---")
     
     spot_df = pd.DataFrame()
-    if segment == "NSE":
+    # ---> UPDATED TO FETCH SPOT PRICES FOR BOTH NSE & BSE <---
+    if segment in ["NSE", "BSE"]:
         spot_df = fetch_1min_candles(key, TODAY_STR)
     
     if spot_df.empty:
