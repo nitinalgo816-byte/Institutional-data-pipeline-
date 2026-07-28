@@ -18,7 +18,6 @@ HEADERS = {
 RISK_FREE_RATE = 0.07
 
 def get_latest_trading_date():
-    """Uses UTC time to guarantee it matches the Indian trading day that just closed."""
     today = datetime.now(timezone.utc).date()
     if today.weekday() == 5:  # Saturday
         target = today - timedelta(days=1)
@@ -31,7 +30,6 @@ def get_latest_trading_date():
 TODAY_STR = get_latest_trading_date()
 print(f"📅 Target Data Date set to: {TODAY_STR}")
 
-# Dynamically create a dated subfolder for daily historical archiving
 FOLDER_PATH = f"output_data/{TODAY_STR}/"
 os.makedirs(FOLDER_PATH, exist_ok=True)
 
@@ -59,7 +57,6 @@ except Exception as e:
 # ==========================================
 # 3. EXPANDED INSTITUTIONAL ASSET UNIVERSE 
 # ==========================================
-# ---> SENSEX & BANKEX ADDED HERE <---
 INDICES = {
     'NIFTY_50': {'key': 'NSE_INDEX|Nifty 50', 'segment': 'NSE', 'gap': 50},
     'BANKNIFTY': {'key': 'NSE_INDEX|Nifty Bank', 'segment': 'NSE', 'gap': 100},
@@ -167,7 +164,6 @@ def fetch_1min_candles(instrument_key, date_str):
     return pd.DataFrame()
 
 def get_live_contracts(key, contract_type="future", segment="NSE"):
-    # ---> UPDATED TO SUPPORT BSE CONTRACT FETCHING <---
     if segment in ["NSE", "BSE"]:
         url = f"https://api.upstox.com/v2/{contract_type}/contract"
         params = {'instrument_key': key}
@@ -222,7 +218,6 @@ def process_asset(name, config):
     print(f"\n--- Analyzing: {name} ({segment}) ---")
     
     spot_df = pd.DataFrame()
-    # ---> UPDATED TO FETCH SPOT PRICES FOR BOTH NSE & BSE <---
     if segment in ["NSE", "BSE"]:
         spot_df = fetch_1min_candles(key, TODAY_STR)
     
@@ -256,7 +251,7 @@ def process_asset(name, config):
     fut_contracts = get_live_contracts(key, "future", segment)
     if not fut_contracts.empty and 'expiry' in fut_contracts.columns:
         future_expiries = sorted(fut_contracts['expiry'].unique())[:3]
-        for f_exp in future_expiries:
+        for i, f_exp in enumerate(future_expiries):
             f_match = fut_contracts[fut_contracts['expiry'] == f_exp].iloc[0]
             fut_df = fetch_1min_candles(f_match['instrument_key'], TODAY_STR)
             if not fut_df.empty:
@@ -264,7 +259,7 @@ def process_asset(name, config):
                 fut_file_name = f"{name}_{sym}_Future.csv"
                 fut_file_path = os.path.join(FOLDER_PATH, fut_file_name)
                 fut_df.to_csv(fut_file_path, index=False)
-                print(f"   ✅ Saved Future: {sym}")
+                print(f"   ✅ Saved Future: {sym} ({i+1}/{len(future_expiries)})")
             time.sleep(0.3)
 
     # Fetch Options Chain & Compute Greeks
@@ -294,9 +289,11 @@ def process_asset(name, config):
                 {'strike': strike_below, 'type': 'PE', 'tag': 'OTM'}
             ]
             
+            found_options = 0
             for t in targets:
+                # FIXED: Uses tradingsymbol for safer CE/PE matching to prevent empty dataframes
                 match = expiry_chain[(pd.to_numeric(expiry_chain['strike_price']) == t['strike']) & 
-                                     (expiry_chain['instrument_type'].astype(str).str.contains(t['type']))]
+                                     (expiry_chain['tradingsymbol'].astype(str).str.contains(t['type']))]
                 if match.empty:
                     continue
                     
@@ -309,30 +306,47 @@ def process_asset(name, config):
                 t_days = 7.0 if is_index else 30.0 
                 master_df['T_Annual'] = t_days / 365.0
                 
+                # FIXED: Initialize blank Greeks in case math fails
+                master_df['IV'] = np.nan
+                master_df['Delta'] = np.nan
+                master_df['Gamma'] = np.nan
+                master_df['Theta'] = np.nan
+                master_df['Vega'] = np.nan
+                
+                # FIXED: py_vollib_vectorized strictly requires 'c' or 'p'
+                opt_flag = 'c' if t['type'] == 'CE' else 'p'
+                
                 try:
-                    greeks = py_vollib_vectorized.get_all_greeks(
-                        flag=t['type'].lower(),
-                        S=master_df['Close_Spot'],
-                        K=t['strike'],
-                        t=master_df['T_Annual'],
-                        r=RISK_FREE_RATE,
-                        price=master_df['Close'],
-                        return_as='dataframe'
-                    )
-                    master_df['IV'] = greeks['iv']
-                    master_df['Delta'] = greeks['delta']
-                    master_df['Gamma'] = greeks['gamma']
-                    master_df['Theta'] = greeks['theta']
-                    master_df['Vega'] = greeks['vega']
-                    
-                    opt_file_name = f"{name}_{nearest_expiry}_{t['strike']}_{t['type']}_{t['tag']}_Enriched.csv"
-                    opt_file_path = os.path.join(FOLDER_PATH, opt_file_name)
-                    master_df.to_csv(opt_file_path, index=False)
-                except Exception:
-                    pass
+                    # Only calculate Greeks on rows where price > 0 to prevent division by zero crashes
+                    valid_idx = (master_df['Close'] > 0) & (master_df['Close_Spot'] > 0)
+                    if valid_idx.any():
+                        greeks = py_vollib_vectorized.get_all_greeks(
+                            flag=opt_flag,
+                            S=master_df.loc[valid_idx, 'Close_Spot'],
+                            K=t['strike'],
+                            t=master_df.loc[valid_idx, 'T_Annual'],
+                            r=RISK_FREE_RATE,
+                            price=master_df.loc[valid_idx, 'Close'],
+                            return_as='dataframe'
+                        )
+                        master_df.loc[valid_idx, 'IV'] = greeks['iv']
+                        master_df.loc[valid_idx, 'Delta'] = greeks['delta']
+                        master_df.loc[valid_idx, 'Gamma'] = greeks['gamma']
+                        master_df.loc[valid_idx, 'Theta'] = greeks['theta']
+                        master_df.loc[valid_idx, 'Vega'] = greeks['vega']
+                except Exception as e:
+                    print(f"   ⚠️ Could not compute Greeks for {t['strike']} {t['type']} (Saving raw data anyway)")
+                
+                opt_file_name = f"{name}_{nearest_expiry}_{t['strike']}_{t['type']}_{t['tag']}_Enriched.csv"
+                opt_file_path = os.path.join(FOLDER_PATH, opt_file_name)
+                master_df.to_csv(opt_file_path, index=False)
+                found_options += 1
                 time.sleep(0.3) 
                 
-        print(f"   ✅ Processed Options Chain & Greeks for {name}")
+            if found_options > 0:
+                print(f"   ✅ Processed Options Chain & Greeks for {name} ({found_options} contracts)")
+            else:
+                print(f"   ⚠️ No valid Option contracts found to process for {name}")
 
 # ==========================================
 # 6. MAIN EXECUTION
