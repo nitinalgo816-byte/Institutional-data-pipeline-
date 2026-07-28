@@ -1,4 +1,5 @@
 import os
+import sys
 import io
 import requests
 import pandas as pd
@@ -17,6 +18,20 @@ HEADERS = {
 }
 RISK_FREE_RATE = 0.07
 
+def validate_token():
+    """Stops the script immediately if the API token is expired to prevent empty ghost folders."""
+    print("\n🔐 Validating Upstox API Token...")
+    try:
+        res = requests.get("https://api.upstox.com/v2/user/profile", headers=HEADERS)
+        if res.status_code == 401:
+            print("🚨 FATAL ERROR: Your Upstox API Token is EXPIRED or INVALID.")
+            print("   Git will not commit empty folders. Please update UPSTOX_ACCESS_TOKEN in GitHub Secrets!")
+            sys.exit(1)
+        else:
+            print("   ✅ Token is Valid! Proceeding to data extraction.")
+    except Exception as e:
+        print(f"   ⚠️ Could not validate token, proceeding with caution: {e}")
+
 def get_latest_trading_date():
     today = datetime.now(timezone.utc).date()
     if today.weekday() == 5:  # Saturday
@@ -28,8 +43,6 @@ def get_latest_trading_date():
     return target.strftime('%Y-%m-%d')
 
 TODAY_STR = get_latest_trading_date()
-print(f"📅 Target Data Date set to: {TODAY_STR}")
-
 FOLDER_PATH = f"output_data/{TODAY_STR}/"
 os.makedirs(FOLDER_PATH, exist_ok=True)
 
@@ -57,12 +70,13 @@ except Exception as e:
 # ==========================================
 # 3. EXPANDED INSTITUTIONAL ASSET UNIVERSE 
 # ==========================================
+# 'underlying' added to natively map Indices AND all 200 Stocks to their Futures and Options
 INDICES = {
-    'NIFTY_50': {'key': 'NSE_INDEX|Nifty 50', 'segment': 'NSE', 'gap': 50},
-    'BANKNIFTY': {'key': 'NSE_INDEX|Nifty Bank', 'segment': 'NSE', 'gap': 100},
-    'FINNIFTY': {'key': 'NSE_INDEX|Nifty Fin Service', 'segment': 'NSE', 'gap': 50},
-    'SENSEX': {'key': 'BSE_INDEX|SENSEX', 'segment': 'BSE', 'gap': 100},
-    'BANKEX': {'key': 'BSE_INDEX|BANKEX', 'segment': 'BSE', 'gap': 100}
+    'NIFTY_50': {'key': 'NSE_INDEX|Nifty 50', 'segment': 'NSE', 'underlying': 'NIFTY'},
+    'BANKNIFTY': {'key': 'NSE_INDEX|Nifty Bank', 'segment': 'NSE', 'underlying': 'BANKNIFTY'},
+    'FINNIFTY': {'key': 'NSE_INDEX|Nifty Fin Service', 'segment': 'NSE', 'underlying': 'FINNIFTY'},
+    'SENSEX': {'key': 'BSE_INDEX|SENSEX', 'segment': 'BSE', 'underlying': 'SENSEX'},
+    'BANKEX': {'key': 'BSE_INDEX|BANKEX', 'segment': 'BSE', 'underlying': 'BANKEX'}
 }
 
 MACRO_INDICATORS = {
@@ -139,7 +153,8 @@ if not MASTER_DB.empty:
     for sym in NIFTY_200_SYMBOLS:
         match = eq_df[eq_df['tradingsymbol'] == sym]
         if not match.empty:
-            EQUITY_ASSETS[sym] = {'key': match.iloc[0]['instrument_key'], 'segment': 'NSE'}
+            # Map 'underlying' to unlock F&O scanning for equities
+            EQUITY_ASSETS[sym] = {'key': match.iloc[0]['instrument_key'], 'segment': 'NSE', 'underlying': sym}
     print(f"   ✅ Successfully mapped {len(EQUITY_ASSETS)} Equities from the master database.")
 
 MASTER_SPOT_LIST = {**MACRO_INDICATORS, **CURRENCIES, **MCX_COMMODITIES, **EQUITY_ASSETS}
@@ -163,27 +178,25 @@ def fetch_1min_candles(instrument_key, date_str):
         pass
     return pd.DataFrame()
 
-def get_live_contracts(key, contract_type="future", segment="NSE"):
-    if segment in ["NSE", "BSE"]:
-        url = f"https://api.upstox.com/v2/{contract_type}/contract"
-        params = {'instrument_key': key}
-        try:
-            response = requests.get(url, headers=HEADERS, params=params)
-            if response.status_code == 200:
-                df = pd.DataFrame(response.json().get('data', []))
-                if not df.empty and 'expiry' in df.columns:
-                    df = df[df['expiry'] >= TODAY_STR]
-                return df
-        except Exception:
-            pass
+def get_live_contracts(config, contract_type="future"):
+    """Scans the Master DB directly to unlock F&O for all 200 Stocks and Indices instantly."""
+    if MASTER_DB.empty: 
         return pd.DataFrame()
+        
+    underlying = config.get('underlying')
+    
+    if underlying: # Process Equities & Indices perfectly
+        inst_types = ['FUTIDX', 'FUTSTK'] if contract_type == "future" else ['OPTIDX', 'OPTSTK']
+        df = MASTER_DB[(MASTER_DB['name'] == underlying) & (MASTER_DB['instrument_type'].isin(inst_types))]
+        if not df.empty and 'expiry' in df.columns:
+            df = df[df['expiry'] >= TODAY_STR]
+        return df
     else:
-        if MASTER_DB.empty: return pd.DataFrame()
-        
+        # Process MCX & Currencies
         type_str = 'FUT' if contract_type == "future" else 'OPT'
-        keys_to_try = key if isinstance(key, list) else [key]
-        
+        keys_to_try = config['key'] if isinstance(config['key'], list) else [config['key']]
         filtered_df = pd.DataFrame()
+        
         for k in keys_to_try:
             if contract_type == "future":
                 regex_pattern = f"^{k}\\d{{2}}[A-Z]{{3}}FUT" 
@@ -212,8 +225,6 @@ def get_live_contracts(key, contract_type="future", segment="NSE"):
 def process_asset(name, config):
     key = config['key']
     segment = config['segment']
-    strike_gap = config.get('gap', None)
-    is_index = True if 'INDEX' in str(key) else False
     
     print(f"\n--- Analyzing: {name} ({segment}) ---")
     
@@ -222,7 +233,7 @@ def process_asset(name, config):
         spot_df = fetch_1min_candles(key, TODAY_STR)
     
     if spot_df.empty:
-        fut_contracts = get_live_contracts(key, "future", segment)
+        fut_contracts = get_live_contracts(config, "future")
         if not fut_contracts.empty and 'expiry' in fut_contracts.columns:
             valid_expiries = sorted(fut_contracts['expiry'].unique())
             for exp in valid_expiries:
@@ -234,7 +245,7 @@ def process_asset(name, config):
                     break
 
     if spot_df.empty:
-        print(f"   ⚠️ No Base data found for {name} on {TODAY_STR}. Skipping derivatives.")
+        print(f"   ⚠️ No Base data found for {name}. Token may be expired or market is closed.")
         return
         
     base_file_name = f"{name}_Base_1min.csv"
@@ -247,8 +258,10 @@ def process_asset(name, config):
     if name in MACRO_INDICATORS:
         return
 
-    # Fetch Futures Data
-    fut_contracts = get_live_contracts(key, "future", segment)
+    # ----------------------------------------
+    # FETCH FUTURES FOR INDICES & EQUITIES
+    # ----------------------------------------
+    fut_contracts = get_live_contracts(config, "future")
     if not fut_contracts.empty and 'expiry' in fut_contracts.columns:
         future_expiries = sorted(fut_contracts['expiry'].unique())[:3]
         for i, f_exp in enumerate(future_expiries):
@@ -262,8 +275,10 @@ def process_asset(name, config):
                 print(f"   ✅ Saved Future: {sym} ({i+1}/{len(future_expiries)})")
             time.sleep(0.3)
 
-    # Fetch Options Chain & Compute Greeks
-    opt_contracts = get_live_contracts(key, "option", segment)
+    # ----------------------------------------
+    # FETCH OPTIONS FOR INDICES & EQUITIES
+    # ----------------------------------------
+    opt_contracts = get_live_contracts(config, "option")
     if not opt_contracts.empty and 'expiry' in opt_contracts.columns:
         nearest_expiry = sorted(opt_contracts['expiry'].unique())[0]
         expiry_chain = opt_contracts[opt_contracts['expiry'] == nearest_expiry]
@@ -273,12 +288,9 @@ def process_asset(name, config):
             atm_strike = min(available_strikes, key=lambda x: abs(x - latest_spot))
             atm_idx = available_strikes.index(atm_strike)
             
-            if is_index and strike_gap:
-                strike_below = atm_strike - strike_gap
-                strike_above = atm_strike + strike_gap
-            else:
-                strike_below = available_strikes[max(0, atm_idx - 1)]
-                strike_above = available_strikes[min(len(available_strikes)-1, atm_idx + 1)]
+            # Dynamically calculates strike gaps (works for all 200 stocks automatically)
+            strike_below = available_strikes[atm_idx - 1] if atm_idx > 0 else atm_strike
+            strike_above = available_strikes[atm_idx + 1] if atm_idx < len(available_strikes) - 1 else atm_strike
             
             targets = [
                 {'strike': strike_below, 'type': 'CE', 'tag': 'ITM'},
@@ -289,9 +301,14 @@ def process_asset(name, config):
                 {'strike': strike_below, 'type': 'PE', 'tag': 'OTM'}
             ]
             
+            # Precision Time-To-Expiry logic
+            expiry_date = pd.to_datetime(nearest_expiry).date()
+            today_date = pd.to_datetime(TODAY_STR).date()
+            days_to_expiry = (expiry_date - today_date).days
+            t_days = float(days_to_expiry) if days_to_expiry > 0 else 0.5 
+            
             found_options = 0
             for t in targets:
-                # FIXED: Uses tradingsymbol for safer CE/PE matching to prevent empty dataframes
                 match = expiry_chain[(pd.to_numeric(expiry_chain['strike_price']) == t['strike']) & 
                                      (expiry_chain['tradingsymbol'].astype(str).str.contains(t['type']))]
                 if match.empty:
@@ -302,22 +319,17 @@ def process_asset(name, config):
                     continue
                     
                 master_df = pd.merge(opt_df, spot_df[['Date', 'Close']], on='Date', how='inner', suffixes=('', '_Spot'))
-                
-                t_days = 7.0 if is_index else 30.0 
                 master_df['T_Annual'] = t_days / 365.0
                 
-                # FIXED: Initialize blank Greeks in case math fails
                 master_df['IV'] = np.nan
                 master_df['Delta'] = np.nan
                 master_df['Gamma'] = np.nan
                 master_df['Theta'] = np.nan
                 master_df['Vega'] = np.nan
                 
-                # FIXED: py_vollib_vectorized strictly requires 'c' or 'p'
                 opt_flag = 'c' if t['type'] == 'CE' else 'p'
                 
                 try:
-                    # Only calculate Greeks on rows where price > 0 to prevent division by zero crashes
                     valid_idx = (master_df['Close'] > 0) & (master_df['Close_Spot'] > 0)
                     if valid_idx.any():
                         greeks = py_vollib_vectorized.get_all_greeks(
@@ -334,8 +346,8 @@ def process_asset(name, config):
                         master_df.loc[valid_idx, 'Gamma'] = greeks['gamma']
                         master_df.loc[valid_idx, 'Theta'] = greeks['theta']
                         master_df.loc[valid_idx, 'Vega'] = greeks['vega']
-                except Exception as e:
-                    print(f"   ⚠️ Could not compute Greeks for {t['strike']} {t['type']} (Saving raw data anyway)")
+                except Exception:
+                    pass
                 
                 opt_file_name = f"{name}_{nearest_expiry}_{t['strike']}_{t['type']}_{t['tag']}_Enriched.csv"
                 opt_file_path = os.path.join(FOLDER_PATH, opt_file_name)
@@ -345,14 +357,13 @@ def process_asset(name, config):
                 
             if found_options > 0:
                 print(f"   ✅ Processed Options Chain & Greeks for {name} ({found_options} contracts)")
-            else:
-                print(f"   ⚠️ No valid Option contracts found to process for {name}")
 
 # ==========================================
 # 6. MAIN EXECUTION
 # ==========================================
 def main():
     print(f"\n🚀 INITIALIZING DATA CAPTURE FOR {TODAY_STR}")
+    validate_token()
 
     for name, config in INDICES.items():
         process_asset(name, config)
