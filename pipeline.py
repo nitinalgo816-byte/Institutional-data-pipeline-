@@ -19,7 +19,6 @@ HEADERS = {
 RISK_FREE_RATE = 0.07
 
 def validate_token():
-    """Stops the script immediately if the API token is expired to prevent empty ghost folders."""
     print("\n🔐 Validating Upstox API Token...")
     try:
         res = requests.get("https://api.upstox.com/v2/user/profile", headers=HEADERS)
@@ -33,13 +32,21 @@ def validate_token():
         print(f"   ⚠️ Could not validate token, proceeding with caution: {e}")
 
 def get_latest_trading_date():
-    today = datetime.now(timezone.utc).date()
-    if today.weekday() == 5:  # Saturday
-        target = today - timedelta(days=1)
-    elif today.weekday() == 6:  # Sunday
-        target = today - timedelta(days=2)
+    """Smart timezone logic to fetch the correct trading day, even if run manually in the morning."""
+    now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    
+    if now_ist.hour < 9:
+        target_date = now_ist.date() - timedelta(days=1)
     else:
-        target = today
+        target_date = now_ist.date()
+        
+    if target_date.weekday() == 5:  
+        target = target_date - timedelta(days=1)
+    elif target_date.weekday() == 6:  
+        target = target_date - timedelta(days=2)
+    else:
+        target = target_date
+        
     return target.strftime('%Y-%m-%d')
 
 TODAY_STR = get_latest_trading_date()
@@ -70,7 +77,6 @@ except Exception as e:
 # ==========================================
 # 3. EXPANDED INSTITUTIONAL ASSET UNIVERSE 
 # ==========================================
-# 'underlying' added to natively map Indices AND all 200 Stocks to their Futures and Options
 INDICES = {
     'NIFTY_50': {'key': 'NSE_INDEX|Nifty 50', 'segment': 'NSE', 'underlying': 'NIFTY'},
     'BANKNIFTY': {'key': 'NSE_INDEX|Nifty Bank', 'segment': 'NSE', 'underlying': 'BANKNIFTY'},
@@ -118,33 +124,35 @@ MCX_COMMODITIES = {
     'NICKEL_Mini': {'key': ['NICKELM', 'NICKELMINI'], 'segment': 'MCX', 'lot_size': 250}
 }
 
+# 100% Exact match to ind_nifty200list.csv
 NIFTY_200_SYMBOLS = [
     '360ONE', 'ABB', 'APLAPOLLO', 'AUBANK', 'ADANIENSOL', 'ADANIENT', 'ADANIGREEN', 
-    'ADANIPORTS', 'ADANIPOWER', 'ATGL', 'ABCAPITAL', 'ABFRL', 'ALKEM', 'AMBUJACEM', 
-    'APOLLOHOSP', 'APOLLOTYRE', 'ASHOKLEY', 'ASIANPAINT', 'ASTRAL', 'AUROPHARMA', 
-    'DMART', 'AXISBANK', 'BSE', 'BAJAJ-AUTO', 'BAJFINANCE', 'BAJAJFINSV', 'BAJAJHIND', 
-    'BALKRISIND', 'BANKBARODA', 'BANKINDIA', 'BATAINDIA', 'BEL', 'BHARATFORG', 
-    'BHEL', 'BPCL', 'BHARTIARTL', 'BIOCON', 'BOSCHLTD', 'BRITANNIA', 'CESC', 
-    'CGPOWER', 'CANBK', 'CHOLAFIN', 'CIPLA', 'COALINDIA', 'COFORGE', 'COLPAL', 
-    'CONCOR', 'COROMANDEL', 'CROMPTON', 'CUB', 'CUMMINSIND', 'DLF', 'DABUR', 
-    'DALBHARAT', 'DEEPAKFERT', 'DIVISLAB', 'DIXON', 'LALPATHLAB', 'DRREDDY', 
-    'EICHERMOT', 'ESCORTS', 'EXIDEIND', 'NYKAA', 'FederalBNK', 'GAIL', 'GMRAIRPORT', 
-    'GLENMARK', 'GODREJCP', 'GODREJPROP', 'GRASIM', 'GUJGASLTD', 'HCLTECH', 
-    'HDFCBANK', 'HDFCLIFE', 'HAVELLS', 'HEROMOTOCO', 'HINDALCO', 'HAL', 'HINDCOPPER', 
-    'HINDPETRO', 'HINDUNILVR', 'ICICIBANK', 'ICICIGI', 'ICICIPRULI', 'IDBI', 'IDFCFIRSTB', 
-    'ITC', 'IEX', 'IOC', 'IRCTC', 'IRFC', 'IGL', 'INDUSTOWER', 
-    'INDUSINDBK', 'NAUKRI', 'INFY', 'IPCALAB', 'JSWENERGY', 'JSWSTEEL', 'JINDALSTEL', 
-    'JIOFIN', 'JUBLFOOD', 'KOTAKBANK', 'LTIM', 'LT', 'LUPIN', 'MRF', 'M&MFIN', 
-    'M&M', 'MANKIND', 'MARICO', 'MARUTI', 'MAXHEALTH', 'MPHASIS', 'MUTHOOTFIN', 
-    'NHPC', 'NMDC', 'NTPC', 'NATIONALUM', 'NESTLEIND', 'OBEROIRLTY', 'ONGC', 'PIIND', 
-    'PAGEIND', 'PATANJALI', 'PERSISTENT', 'PETRONET', 'PFIZER', 'PIDILITIND', 
-    'POWERCGRID', 'PNB', 'PVRINOX', 'RECLTD', 'RELIANCE', 'SBICARD', 'SBILIFE', 
-    'SBIN', 'SHREECEM', 'SHRIRAMFIN', 'SIEMENS', 'SONACOMS', 'SBFC', 'SRF', 
-    'SUNPHARMA', 'SUNTV', 'SYNGENE', 'TVSMOTOR', 'TCS', 'TATACHEM', 'TATACOMM', 
-    'TATACONSUM', 'TATAELXSI', 'TATAMOTORS', 'TATAPOWER', 'TATASTEEL', 'TECHM', 
-    'TITAN', 'TORNTPHARM', 'TORNTPOWER', 'TRENT', 'TIINDIA', 'UCL', 'ULTRACEMCO', 
-    'UNIONBANK', 'UPL', 'VEDL', 'IDEA', 'VOLTAS', 'WHIRLPOOL', 'WIPRO', 'YESBANK', 
-    'ZOMATO', 'ZYDUSLIFE'
+    'ADANIPORTS', 'ADANIPOWER', 'ATGL', 'ABCAPITAL', 'ALKEM', 'AMBUJACEM', 'APOLLOHOSP', 
+    'ASHOKLEY', 'ASIANPAINT', 'ASTRAL', 'AUROPHARMA', 'DMART', 'AXISBANK', 'BSE', 
+    'BAJAJ-AUTO', 'BAJFINANCE', 'BAJAJFINSV', 'BAJAJHLDNG', 'BANKBARODA', 'BANKINDIA', 
+    'BDL', 'BEL', 'BHARATFORG', 'BHEL', 'BPCL', 'BHARTIARTL', 'GROWW', 'BIOCON', 
+    'BLUESTARCO', 'BOSCHLTD', 'BRITANNIA', 'CGPOWER', 'CANBK', 'CHOLAFIN', 'CIPLA', 
+    'COALINDIA', 'COCHINSHIP', 'COFORGE', 'COLPAL', 'CONCOR', 'COROMANDEL', 'CUMMINSIND', 
+    'DLF', 'DABUR', 'DIVISLAB', 'DIXON', 'DRREDDY', 'EICHERMOT', 'ETERNAL', 'EXIDEIND', 
+    'NYKAA', 'FEDERALBNK', 'FORTIS', 'GAIL', 'GVT&D', 'GMRAIRPORT', 'GLENMARK', 
+    'GODFRYPHLP', 'GODREJCP', 'GODREJPROP', 'GRASIM', 'HCLTECH', 'HDFCAMC', 'HDFCBANK', 
+    'HDFCLIFE', 'HAVELLS', 'HEROMOTOCO', 'HINDALCO', 'HAL', 'HINDPETRO', 'HINDUNILVR', 
+    'HINDZINC', 'POWERINDIA', 'HUDCO', 'HYUNDAI', 'ICICIBANK', 'ICICIGI', 'ICICIAMC', 
+    'IDFCFIRSTB', 'ITC', 'INDIANB', 'INDHOTEL', 'IOC', 'IRCTC', 'IRFC', 'IREDA', 
+    'INDUSTOWER', 'INDUSINDBK', 'NAUKRI', 'INFY', 'INDIGO', 'JSWENERGY', 'JSWSTEEL', 
+    'JINDALSTEL', 'JIOFIN', 'JUBLFOOD', 'KEI', 'KPITTECH', 'KALYANKJIL', 'KOTAKBANK', 
+    'LTF', 'LGEINDIA', 'LICHSGFIN', 'LTM', 'LT', 'LAURUSLABS', 'LENSKART', 'LODHA', 
+    'LUPIN', 'MRF', 'M&MFIN', 'M&M', 'MANKIND', 'MARICO', 'MARUTI', 'MFSL', 'MAXHEALTH', 
+    'MAZDOCK', 'MOTILALOFS', 'MPHASIS', 'MCX', 'MUTHOOTFIN', 'NHPC', 'NMDC', 'NTPC', 
+    'NATIONALUM', 'NESTLEIND', 'OBEROIRLTY', 'ONGC', 'OIL', 'PAYTM', 'OFSS', 'POLICYBZR', 
+    'PIIND', 'PAGEIND', 'PATANJALI', 'PERSISTENT', 'PHOENIXLTD', 'PIDILITIND', 'POLYCAB', 
+    'PFC', 'POWERGRID', 'PREMIERENE', 'PRESTIGE', 'PNB', 'RECLTD', 'RADICO', 'RVNL', 
+    'RELIANCE', 'SBICARD', 'SBILIFE', 'SRF', 'MOTHERSON', 'SHREECEM', 'SHRIRAMFIN', 
+    'ENRIN', 'SIEMENS', 'SOLARINDS', 'SBIN', 'SAIL', 'SUNPHARMA', 'SUPREMEIND', 'SUZLON', 
+    'SWIGGY', 'TVSMOTOR', 'TATACAP', 'TATACOMM', 'TCS', 'TATACONSUM', 'TATAELXSI', 
+    'TATAINVEST', 'TMCV', 'TMPV', 'TATAPOWER', 'TATASTEEL', 'TECHM', 'TITAN', 
+    'TORNTPHARM', 'TRENT', 'TIINDIA', 'UPL', 'ULTRACEMCO', 'UNIONBANK', 'UNITDSPR', 
+    'VBL', 'VEDL', 'VMM', 'IDEA', 'VOLTAS', 'WAAREEENER', 'WIPRO', 'YESBANK', 'ZYDUSLIFE'
 ]
 
 EQUITY_ASSETS = {}
@@ -153,9 +161,8 @@ if not MASTER_DB.empty:
     for sym in NIFTY_200_SYMBOLS:
         match = eq_df[eq_df['tradingsymbol'] == sym]
         if not match.empty:
-            # Map 'underlying' to unlock F&O scanning for equities
             EQUITY_ASSETS[sym] = {'key': match.iloc[0]['instrument_key'], 'segment': 'NSE', 'underlying': sym}
-    print(f"   ✅ Successfully mapped {len(EQUITY_ASSETS)} Equities from the master database.")
+    print(f"   ✅ Successfully mapped {len(EQUITY_ASSETS)} Equities out of {len(NIFTY_200_SYMBOLS)} from the master database.")
 
 MASTER_SPOT_LIST = {**MACRO_INDICATORS, **CURRENCIES, **MCX_COMMODITIES, **EQUITY_ASSETS}
 
@@ -179,20 +186,18 @@ def fetch_1min_candles(instrument_key, date_str):
     return pd.DataFrame()
 
 def get_live_contracts(config, contract_type="future"):
-    """Scans the Master DB directly to unlock F&O for all 200 Stocks and Indices instantly."""
     if MASTER_DB.empty: 
         return pd.DataFrame()
         
     underlying = config.get('underlying')
     
-    if underlying: # Process Equities & Indices perfectly
+    if underlying:
         inst_types = ['FUTIDX', 'FUTSTK'] if contract_type == "future" else ['OPTIDX', 'OPTSTK']
         df = MASTER_DB[(MASTER_DB['name'] == underlying) & (MASTER_DB['instrument_type'].isin(inst_types))]
         if not df.empty and 'expiry' in df.columns:
             df = df[df['expiry'] >= TODAY_STR]
         return df
     else:
-        # Process MCX & Currencies
         type_str = 'FUT' if contract_type == "future" else 'OPT'
         keys_to_try = config['key'] if isinstance(config['key'], list) else [config['key']]
         filtered_df = pd.DataFrame()
@@ -245,7 +250,7 @@ def process_asset(name, config):
                     break
 
     if spot_df.empty:
-        print(f"   ⚠️ No Base data found for {name}. Token may be expired or market is closed.")
+        print(f"   ⚠️ No Base data found for {name} on {TODAY_STR}. Token may be expired or market is closed.")
         return
         
     base_file_name = f"{name}_Base_1min.csv"
@@ -288,7 +293,6 @@ def process_asset(name, config):
             atm_strike = min(available_strikes, key=lambda x: abs(x - latest_spot))
             atm_idx = available_strikes.index(atm_strike)
             
-            # Dynamically calculates strike gaps (works for all 200 stocks automatically)
             strike_below = available_strikes[atm_idx - 1] if atm_idx > 0 else atm_strike
             strike_above = available_strikes[atm_idx + 1] if atm_idx < len(available_strikes) - 1 else atm_strike
             
@@ -301,7 +305,6 @@ def process_asset(name, config):
                 {'strike': strike_below, 'type': 'PE', 'tag': 'OTM'}
             ]
             
-            # Precision Time-To-Expiry logic
             expiry_date = pd.to_datetime(nearest_expiry).date()
             today_date = pd.to_datetime(TODAY_STR).date()
             days_to_expiry = (expiry_date - today_date).days
