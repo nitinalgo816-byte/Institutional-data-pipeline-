@@ -124,7 +124,6 @@ MCX_COMMODITIES = {
     'NICKEL_Mini': {'key': ['NICKELM', 'NICKELMINI'], 'segment': 'MCX', 'lot_size': 250}
 }
 
-# 100% Exact match to ind_nifty200list.csv
 NIFTY_200_SYMBOLS = [
     '360ONE', 'ABB', 'APLAPOLLO', 'AUBANK', 'ADANIENSOL', 'ADANIENT', 'ADANIGREEN', 
     'ADANIPORTS', 'ADANIPOWER', 'ATGL', 'ABCAPITAL', 'ALKEM', 'AMBUJACEM', 'APOLLOHOSP', 
@@ -228,15 +227,16 @@ def get_live_contracts(config, contract_type="future"):
 # 5. UNIVERSAL PROCESSING ENGINE
 # ==========================================
 def process_asset(name, config):
-    key = config['key']
+    key = config.get('key')
     segment = config['segment']
     
     print(f"\n--- Analyzing: {name} ({segment}) ---")
     
     spot_df = pd.DataFrame()
-    if segment in ["NSE", "BSE"]:
+    if key and segment in ["NSE", "BSE", "CDS"]:
         spot_df = fetch_1min_candles(key, TODAY_STR)
     
+    # FALLBACK: If direct cash/spot fetch fails, automatically grab the nearest active Future as base spot
     if spot_df.empty:
         fut_contracts = get_live_contracts(config, "future")
         if not fut_contracts.empty and 'expiry' in fut_contracts.columns:
@@ -246,11 +246,11 @@ def process_asset(name, config):
                 spot_df = fetch_1min_candles(f_match['instrument_key'], TODAY_STR)
                 if not spot_df.empty:
                     sym_name = f_match.get('tradingsymbol', exp)
-                    print(f"   🔄 Extracted Active Future ({sym_name}) as Base Spot")
+                    print(f"   🔄 Extracted Active Future ({sym_name}) as Base Spot Fallback")
                     break
 
     if spot_df.empty:
-        print(f"   ⚠️ No Base data found for {name} on {TODAY_STR}. Token may be expired or market is closed.")
+        print(f"   ⚠️ No Base data found for {name} on {TODAY_STR}. Market closed or contract inactive.")
         return
         
     base_file_name = f"{name}_Base_1min.csv"
