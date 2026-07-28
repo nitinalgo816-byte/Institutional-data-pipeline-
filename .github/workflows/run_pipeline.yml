@@ -49,14 +49,14 @@ jobs:
 
       - name: Zip Data for Telegram
         run: |
-          # Automatically find the most recent folder Python worked on to bypass weekend date mismatches
+          # Automatically find the most recent folder Python worked on
           LATEST_FOLDER=$(ls -td output_data/*/ | head -1 | sed 's/\/$//')
           TARGET_DATE=$(basename "$LATEST_FOLDER")
           
           echo "Target trading date detected as: $TARGET_DATE"
           zip -r "Market_Data_$TARGET_DATE.zip" "output_data/$TARGET_DATE/"
           
-          # Save variables for the Telegram step
+          # Save variables for subsequent steps
           echo "ZIP_FILE=Market_Data_$TARGET_DATE.zip" >> $GITHUB_ENV
           echo "TARGET_DATE=$TARGET_DATE" >> $GITHUB_ENV
 
@@ -65,8 +65,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          # Updated caption to include the newly added BSE indices
-          CAPTION="📊 Complete Market Data Archive for ${{ env.TARGET_DATE }} (NSE, BSE & MCX) - Pipeline Completed ✅"
+          CAPTION="📊 Complete Institutional Market Data Archive for ${{ env.TARGET_DATE }} (NSE, BSE, MCX, Nifty 200 F&O & ETFs) - Pipeline Completed ✅"
           
           curl -F chat_id="$TELEGRAM_CHAT_ID" \
                -F document=@"${{ env.ZIP_FILE }}" \
