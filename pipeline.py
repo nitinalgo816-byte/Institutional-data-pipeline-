@@ -32,17 +32,16 @@ def validate_token():
         print(f"   ⚠️ Could not validate token, proceeding with caution: {e}")
 
 def get_latest_trading_date():
-    """Smart timezone logic to fetch the correct trading day, even if run manually in the morning."""
+    """Always targets the most recent fully completed trading day's finalized data."""
     now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
     
-    if now_ist.hour < 9:
-        target_date = now_ist.date() - timedelta(days=1)
-    else:
-        target_date = now_ist.date()
+    # Always look back to the previous calendar day to guarantee complete EOD historical candles are ready
+    target_date = now_ist.date() - timedelta(days=1)
         
-    if target_date.weekday() == 5:  
+    # Standard weekend rollback
+    if target_date.weekday() == 5:  # Saturday -> Friday
         target = target_date - timedelta(days=1)
-    elif target_date.weekday() == 6:  
+    elif target_date.weekday() == 6:  # Sunday -> Friday
         target = target_date - timedelta(days=2)
     else:
         target = target_date
