@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import urllib.parse
 import py_vollib_vectorized
 
-# --- CONFIGURATION & TARGET DATE ---
+# --- CONFIGURATION & ENVIRONMENT VARIABLES ---
 ACCESS_TOKEN = os.getenv("UPSTOX_ACCESS_TOKEN")
 
 HEADERS = {
@@ -18,23 +18,39 @@ HEADERS = {
 }
 RISK_FREE_RATE = 0.07
 
-# HARDCODED TEMPORARY DATE FOR BACKFILL
-TODAY_STR = "2026-09-11"
-FOLDER_PATH = f"output_data/{TODAY_STR}/"
-os.makedirs(FOLDER_PATH, exist_ok=True)
-
 def validate_token():
-    print(f"\n🔐 Validating Upstox API Token for target date: {TODAY_STR}...")
+    print("\n🔐 Validating Upstox API Token...")
     try:
         res = requests.get("https://api.upstox.com/v2/user/profile", headers=HEADERS)
         if res.status_code == 401:
             print("🚨 FATAL ERROR: Your Upstox API Token is EXPIRED or INVALID.")
-            print("   Please update UPSTOX_ACCESS_TOKEN in GitHub Secrets!")
+            print("   Git will not commit empty folders. Please update UPSTOX_ACCESS_TOKEN in GitHub Secrets!")
             sys.exit(1)
         else:
             print("   ✅ Token is Valid! Proceeding to data extraction.")
     except Exception as e:
         print(f"   ⚠️ Could not validate token, proceeding with caution: {e}")
+
+def get_latest_trading_date():
+    """Always targets the most recent fully completed trading day's finalized data."""
+    now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    
+    # Always look back to the previous calendar day to guarantee complete EOD historical candles are ready
+    target_date = now_ist.date() - timedelta(days=1)
+        
+    # Standard weekend rollback
+    if target_date.weekday() == 5:  # Saturday -> Friday
+        target = target_date - timedelta(days=1)
+    elif target_date.weekday() == 6:  # Sunday -> Friday
+        target = target_date - timedelta(days=2)
+    else:
+        target = target_date
+        
+    return target.strftime('%Y-%m-%d')
+
+TODAY_STR = get_latest_trading_date()
+FOLDER_PATH = f"output_data/{TODAY_STR}/"
+os.makedirs(FOLDER_PATH, exist_ok=True)
 
 # ==========================================
 # 2. DOWNLOAD COMPLETE MASTER INSTRUMENT DATABASE
@@ -365,7 +381,7 @@ def process_asset(name, config):
 # 6. MAIN EXECUTION
 # ==========================================
 def main():
-    print(f"\n🚀 INITIALIZING BACKFILL DATA CAPTURE FOR {TODAY_STR}")
+    print(f"\n🚀 INITIALIZING DATA CAPTURE FOR {TODAY_STR}")
     validate_token()
 
     for name, config in INDICES.items():
@@ -376,7 +392,7 @@ def main():
         process_asset(name, config)
         time.sleep(0.5)
 
-    print(f"\n🎉 EXCELLENT! Data for {TODAY_STR} downloaded successfully.")
+    print(f"\n🎉 EXCELLENT! Master Database Updated Successfully.")
 
 if __name__ == "__main__":
     main()
