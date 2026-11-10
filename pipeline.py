@@ -48,7 +48,8 @@ def get_latest_trading_date():
         
     return target.strftime('%Y-%m-%d')
 
-TODAY_STR = get_latest_trading_date()
+# --- OVERRIDDEN TO TARGET 8 NOV 2026 SPECIFICALLY ---
+TODAY_STR = "2026-11-08"
 FOLDER_PATH = f"output_data/{TODAY_STR}/"
 os.makedirs(FOLDER_PATH, exist_ok=True)
 
